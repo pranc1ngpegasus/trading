@@ -2,11 +2,25 @@
 // bans in library code.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use buffa::Message;
+use std::fmt::Write;
+
+// Imported through the crate's re-export, so this file fails if `tws_api::buffa`
+// stops resolving to the version the generated impls target.
+use tws_api::buffa::Message;
 use tws_api::proto::{Contract, Order, PlaceOrderRequest};
 
 fn round_trip<M: Message>(message: &M) -> M {
     M::decode_from_slice(&message.encode_to_vec()).expect("re-encoding a decoded message")
+}
+
+fn encode_hex<M: Message>(message: &M) -> String {
+    message
+        .encode_to_vec()
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a String");
+            hex
+        })
 }
 
 #[test]
@@ -20,6 +34,23 @@ fn contract_round_trips_through_the_wire() {
         ..Contract::default()
     };
     assert_eq!(round_trip(&contract), contract);
+}
+
+#[test]
+fn encoding_matches_protoc() {
+    // Produced by `protoc --encode=protobuf.Contract Contract.proto`.
+    let contract = Contract {
+        con_id: Some(265_598),
+        symbol: Some("AAPL".into()),
+        sec_type: Some("STK".into()),
+        exchange: Some("SMART".into()),
+        currency: Some("USD".into()),
+        ..Contract::default()
+    };
+    assert_eq!(
+        encode_hex(&contract),
+        "08fe9a1012044141504c1a0353544b4205534d4152545203555344"
+    );
 }
 
 #[test]
