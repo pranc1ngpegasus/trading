@@ -7,6 +7,11 @@
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    crane.url = "github:ipetkov/crane";
+    advisory-db.url = "github:rustsec/advisory-db";
+    advisory-db.flake = false;
   };
 
   outputs =
@@ -15,6 +20,9 @@
       flake-parts,
       git-hooks,
       treefmt-nix,
+      rust-overlay,
+      crane,
+      advisory-db,
       ...
     }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -32,20 +40,83 @@
           system,
           ...
         }:
+        let
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
+          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          src = craneLib.cleanCargoSource ./.;
+          commonArgs = {
+            inherit src;
+            strictDeps = true;
+          };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+          linkerPackages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux (
+            with pkgs;
+            [
+              clang
+              mold
+            ]
+          );
+          linkerEnv = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="clang"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="clang"
+          '';
+        in
         {
           _module.args = {
             pkgs = import nixpkgs {
               inherit system;
+              overlays = [ rust-overlay.overlays.default ];
             };
           };
 
           apps = { };
 
-          checks = { };
+          checks = {
+            audit = craneLib.cargoAudit (
+              commonArgs
+              // {
+                inherit advisory-db;
+              }
+            );
+            clippy = craneLib.cargoClippy (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+              }
+            );
+            deny = craneLib.cargoDeny commonArgs;
+            fmt = craneLib.cargoFmt (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+              }
+            );
+            taplo = craneLib.taploFmt commonArgs;
+            test = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+              }
+            );
+          };
 
           devShells = {
             default = pkgs.mkShellNoCC {
               inputsFrom = [ config.pre-commit.devShell ];
+
+              packages = with pkgs; [
+                linkerPackages
+                rustToolchain
+                sccache
+              ];
+
+              shellHook = ''
+                export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+                ${linkerEnv}
+              '';
             };
           };
 
@@ -64,6 +135,7 @@
             projectRootFile = "flake.nix";
             programs = {
               nixfmt.enable = true;
+              taplo.enable = true;
             };
           };
         };
