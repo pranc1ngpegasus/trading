@@ -2,6 +2,12 @@
 allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]
 unused-allowed-license = "allow"
 
+# `buffa` hashes its map type with `foldhash`, which ships under Zlib. Scope the
+# exception to that crate so another Zlib dependency still trips the check.
+[[licenses.exceptions]]
+allow = ["Zlib"]
+crate = "foldhash"
+
 [sources]
 unknown-git = "deny"
 unknown-registry = "deny"

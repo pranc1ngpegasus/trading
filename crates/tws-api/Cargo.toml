@@ -1,0 +1,15 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "tws-api"
+publish = false
+version.workspace = true
+
+[dependencies]
+buffa = { workspace = true }
+
+[build-dependencies]
+buffa-build = { workspace = true }
+
+[lints]
+workspace = true
