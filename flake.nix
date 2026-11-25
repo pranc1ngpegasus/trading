@@ -66,6 +66,8 @@
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="clang"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="clang"
           '';
+
+          twsApi = pkgs.callPackage ./nix/tws-api.nix { };
         in
         {
           _module.args = {
@@ -118,10 +120,12 @@
                 mutator.packages.${system}.default
                 rustToolchain
                 sccache
+                twsApi
               ];
 
               shellHook = ''
                 export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+                export TWS_API_ROOT="${twsApi}/share/tws-api"
                 ${linkerEnv}
               '';
             };
@@ -132,7 +136,9 @@
             check = false;
           };
 
-          packages = { };
+          packages = {
+            inherit twsApi;
+          };
 
           pre-commit.settings = {
             hooks = {
