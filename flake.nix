@@ -12,6 +12,8 @@
     crane.url = "github:ipetkov/crane";
     advisory-db.url = "github:rustsec/advisory-db";
     advisory-db.flake = false;
+    mutator.url = "github:mokmok-dev/mutator";
+    mutator.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -23,12 +25,14 @@
       rust-overlay,
       crane,
       advisory-db,
+      mutator,
       ...
     }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         treefmt-nix.flakeModule
         git-hooks.flakeModule
+        mutator.flakeModules.default
       ];
 
       flake = { };
@@ -94,6 +98,7 @@
                 inherit cargoArtifacts;
               }
             );
+            mutator = config.packages.mutator;
             taplo = craneLib.taploFmt commonArgs;
             test = craneLib.cargoTest (
               commonArgs
@@ -108,7 +113,9 @@
               inputsFrom = [ config.pre-commit.devShell ];
 
               packages = with pkgs; [
+                cargo-mutants
                 linkerPackages
+                mutator.packages.${system}.default
                 rustToolchain
                 sccache
               ];
@@ -118,6 +125,11 @@
                 ${linkerEnv}
               '';
             };
+          };
+
+          mutator = {
+            enable = true;
+            check = false;
           };
 
           packages = { };
