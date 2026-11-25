@@ -50,7 +50,10 @@
           src = craneLib.cleanCargoSource ./.;
           commonArgs = {
             inherit src;
+            # `tws-api` runs protoc and reads the proto tree in its build script.
+            nativeBuildInputs = [ pkgs.protobuf ];
             strictDeps = true;
+            TWS_API_ROOT = "${twsApi}/share/tws-api";
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
@@ -118,6 +121,7 @@
                 cargo-mutants
                 linkerPackages
                 mutator.packages.${system}.default
+                protobuf
                 rustToolchain
                 sccache
                 twsApi
