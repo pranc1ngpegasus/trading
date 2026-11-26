@@ -246,6 +246,8 @@ pub enum Strategy {
     FillsAfterDone,
     /// Follows a snapshot that names a phase the order already passed.
     FollowsStalePhase,
+    /// Relabels a finished order with a live phase, keeping the closing entry.
+    RelabelsAfterDone,
 }
 
 impl Strategy {
@@ -253,8 +255,14 @@ impl Strategy {
         matches!(self, Self::DoubleCountsRedeliveredFill)
     }
 
+    /// A finished order may be moved back to a live phase.
     const fn revives(self) -> bool {
         matches!(self, Self::RevivesAfterDone)
+    }
+
+    /// A finished order may be relabelled with a live phase, entry and all.
+    const fn relabels_after_done(self) -> bool {
+        matches!(self, Self::RelabelsAfterDone)
     }
 
     const fn overwrites_outcome(self) -> bool {
@@ -476,6 +484,18 @@ impl Order {
     /// The revival and the outcome overwrite both leave the fill alone, so neither
     /// can also be read as a fill the log fails to explain.
     fn revive(&self, reported: Phase, filled: Shares) -> Option<Transition> {
+        // This deviation leaves the closing entry in place and records a live
+        // phase after it, so the history re-opens an order the log says closed.
+        // It is the only mutant that reaches that arm of `single_outcome`.
+        if self.strategy.relabels_after_done()
+            && let Some(live) = LivePhase::from_phase(reported)
+        {
+            return Some(Transition::one(
+                TrackedPhase::Live(live),
+                self.filled,
+                Applied::PhaseReport(reported),
+            ));
+        }
         if self.strategy.revives()
             && matches!(reported, Phase::PreSubmitted | Phase::Submitted)
             && let Some(live) = LivePhase::from_phase(reported)
@@ -495,10 +515,18 @@ impl Order {
                 Applied::PhaseReport(reported),
             ));
         }
-        // The deviation records the quantity a finished order's report carries
-        // and leaves the phase alone, so the entry is the only trace it leaves.
-        if self.strategy.fills_after_done() && filled > self.filled {
-            return Some(Transition::one(self.phase, filled, Applied::Filled(filled)));
+        // The deviation records whatever a finished order's report carries and
+        // leaves the phase alone, so the entry is the only trace it leaves. It
+        // records even when the quantity does not advance, which is why it reads
+        // a settled amount rather than comparing: a comparison here would have a
+        // branch no input can separate from the other.
+        if self.strategy.fills_after_done() {
+            let settled = self.filled.max(filled);
+            return Some(Transition::one(
+                self.phase,
+                settled,
+                Applied::Filled(settled),
+            ));
         }
         None
     }
@@ -591,11 +619,11 @@ impl Order {
                 filled: progressed,
             };
         }
-        self.duplicate(reported, filled)
+        self.duplicate(reported)
     }
 
-    fn duplicate(&self, reported: Phase, filled: Shares) -> Transition {
-        if self.strategy.overfills() && filled > Shares::ZERO {
+    fn duplicate(&self, reported: Phase) -> Transition {
+        if self.strategy.overfills() {
             // The deviation counts the repeated snapshot as a new fill. It adds
             // one share and leaves the phase alone, so the order stays live with
             // a quantity past its size instead of the addition also closing it.

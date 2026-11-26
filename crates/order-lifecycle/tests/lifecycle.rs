@@ -452,3 +452,171 @@ fn a_cancel_request_carries_only_the_id() {
     assert_eq!(request.order_id, Some(7));
     assert!(request.order_cancel.as_option().is_none());
 }
+
+#[test]
+fn each_refusal_says_which_contract_it_broke() {
+    let rendered = [
+        (ApplyError::AlreadyDone, "order already finished"),
+        (
+            ApplyError::LogFull,
+            "order has no room for another log entry",
+        ),
+        (ApplyError::UnknownOrder(None), "report names no order"),
+        (
+            ApplyError::InconsistentFill {
+                reported: Shares::new(4),
+                total: TOTAL,
+            },
+            "reported fill 4 does not complete an order of 10",
+        ),
+    ];
+    for (error, expected) in rendered {
+        assert_eq!(error.to_string(), expected);
+    }
+    assert_eq!(
+        ApplyError::UnknownOrder(Some(ID)).to_string(),
+        "order 7 was never placed"
+    );
+    assert_eq!(
+        ApplyError::DuplicateOrder(ID).to_string(),
+        "order 7 is already placed"
+    );
+}
+
+#[test]
+fn each_wire_error_names_the_field_it_could_not_read() {
+    assert_eq!(
+        WireError::MissingOrderId.to_string(),
+        "message has no order id"
+    );
+    assert_eq!(
+        WireError::MissingStatus.to_string(),
+        "message has no order status"
+    );
+    assert_eq!(
+        WireError::BadQuantity("1.5".into()).to_string(),
+        "quantity is not a share count: \"1.5\""
+    );
+}
+
+#[test]
+fn a_wire_quantity_parses_into_its_share_count() {
+    // The two accessors bridge the typed count back out, so a status that goes
+    // through the boundary has to land on the number the wire carried.
+    let message = proto::OrderStatus::default()
+        .with_order_id(7)
+        .with_status("Submitted")
+        .with_filled("42");
+    let Ok(Report::Status { filled, .. }) = parse_status(&message) else {
+        panic!("a complete status parses");
+    };
+    assert_eq!(filled.get(), 42);
+    assert_eq!(i32::from(ID), 7);
+}
+
+#[test]
+fn a_place_request_named_by_its_id_encodes_that_id() {
+    // The id is the only field the tracker keys on, so a request that dropped it
+    // would address a different order than the one the client believes it sent.
+    let request = place_request(ID, &proto::Contract::default(), &proto::Order::default());
+    let decoded = proto::PlaceOrderRequest::decode_from_slice(&request.encode_to_vec())
+        .expect("decoding an encoded PlaceOrderRequest");
+    assert_eq!(decoded.order_id, Some(7));
+}
+
+#[test]
+fn a_cancel_request_named_by_its_id_encodes_that_id() {
+    let request = cancel_request(ID);
+    let decoded = proto::CancelOrderRequest::decode_from_slice(&request.encode_to_vec())
+        .expect("decoding an encoded CancelOrderRequest");
+    assert_eq!(decoded.order_id, Some(7));
+}
+
+#[test]
+fn only_the_client_set_phases_are_ones_the_client_writes() {
+    assert!(Phase::PendingSubmit.is_client_set());
+    assert!(Phase::PendingCancel.is_client_set());
+    for wire in [
+        Phase::ApiPending,
+        Phase::PreSubmitted,
+        Phase::Submitted,
+        Phase::Cancelled,
+        Phase::ApiCancelled,
+        Phase::Filled,
+        Phase::Inactive,
+        Phase::Unknown,
+    ] {
+        assert!(!wire.is_client_set(), "{wire:?} comes from the wire");
+    }
+}
+
+#[test]
+fn a_reconnect_replays_the_phase_the_order_holds() {
+    // The replay is what the client sends itself after the socket drops, so each
+    // phase an order can sit in has to name the status that phase means.
+    let mut order = order();
+    assert_eq!(
+        order.snapshot(),
+        Some((Phase::PendingSubmit, Shares::ZERO, TOTAL))
+    );
+
+    apply(&mut order, &status(Phase::Submitted, 4));
+    assert_eq!(
+        order.snapshot(),
+        Some((Phase::Submitted, Shares::new(4), Shares::new(6)))
+    );
+
+    order.request_cancel().expect("cancel is legal while live");
+    assert_eq!(
+        order.snapshot(),
+        Some((Phase::PendingCancel, Shares::new(4), Shares::new(6)))
+    );
+
+    apply(&mut order, &status(Phase::Filled, 10));
+    assert_eq!(order.snapshot(), Some((Phase::Filled, TOTAL, Shares::ZERO)));
+}
+
+#[test]
+fn a_rejection_has_no_status_to_replay() {
+    // A rejection arrives as an error, so IB answers a reconnect with nothing
+    // rather than with a status the client never saw.
+    let mut order = order();
+    apply(
+        &mut order,
+        &Report::Error {
+            order_id: Some(ID),
+            code: 201,
+            message: "rejected".into(),
+        },
+    );
+    assert_eq!(order.snapshot(), None);
+}
+
+#[test]
+fn every_phase_names_the_wire_status_it_replays() {
+    assert_eq!(
+        TrackedPhase::PendingSubmit.as_phase(),
+        Some(Phase::PendingSubmit)
+    );
+    assert_eq!(
+        TrackedPhase::PendingCancel.as_phase(),
+        Some(Phase::PendingCancel)
+    );
+    for live in [
+        LivePhase::ApiPending,
+        LivePhase::PreSubmitted,
+        LivePhase::Submitted,
+        LivePhase::Inactive,
+    ] {
+        assert_eq!(TrackedPhase::Live(live).as_phase(), Some(live.as_phase()));
+    }
+    assert_eq!(
+        TrackedPhase::Done(Outcome::Filled).as_phase(),
+        Some(Phase::Filled)
+    );
+    assert_eq!(
+        TrackedPhase::Done(Outcome::Cancelled).as_phase(),
+        Some(Phase::Cancelled)
+    );
+    assert_eq!(TrackedPhase::Done(Outcome::Rejected).as_phase(), None);
+}

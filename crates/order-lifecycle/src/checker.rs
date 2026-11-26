@@ -74,19 +74,27 @@ enum Reply {
     PartFill,
     Fill,
     CancelConfirmed,
+    /// A cancellation that reports a partial fill alongside it.
+    ///
+    /// A cancel can be answered with a fill that beat it, and the two arrive in
+    /// one message: the remainder is cancelled while the shares already done
+    /// stay done. Without this reply the partial-fill path of `plan_cancelled`
+    /// has no way to run.
+    CancelConfirmedWithFill,
     Reject,
     CancelByFirm,
     Hold,
 }
 
 impl Reply {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Accept,
         Self::AcceptThenTransmit,
         Self::Transmit,
         Self::PartFill,
         Self::Fill,
         Self::CancelConfirmed,
+        Self::CancelConfirmedWithFill,
         Self::Reject,
         Self::CancelByFirm,
         Self::Hold,
@@ -103,6 +111,7 @@ impl Reply {
             | Self::PartFill
             | Self::Fill
             | Self::CancelConfirmed
+            | Self::CancelConfirmedWithFill
             | Self::Reject
             | Self::Hold => 1,
         }
@@ -116,6 +125,7 @@ impl Reply {
             Self::PartFill => Action::BrokerPartFill { index },
             Self::Fill => Action::BrokerFill { index },
             Self::CancelConfirmed => Action::BrokerCancelConfirmed { index },
+            Self::CancelConfirmedWithFill => Action::BrokerCancelConfirmedWithFill { index },
             Self::Reject => Action::BrokerReject { index },
             Self::CancelByFirm => Action::BrokerCancelByFirm { index },
             Self::Hold => Action::BrokerHold { index },
@@ -141,6 +151,9 @@ impl Reply {
             Self::PartFill => vec![status(Phase::Submitted, Shares::new(TOTAL - 1))],
             Self::Fill => vec![status(Phase::Filled, total)],
             Self::CancelConfirmed => vec![status(Phase::Cancelled, Shares::ZERO)],
+            Self::CancelConfirmedWithFill => {
+                vec![status(Phase::Cancelled, Shares::new(TOTAL - 1))]
+            }
             Self::Reject => vec![Report::Error {
                 order_id: Some(id),
                 code: 201,
@@ -169,6 +182,7 @@ pub enum Action {
     BrokerPartFill { index: usize },
     BrokerFill { index: usize },
     BrokerCancelConfirmed { index: usize },
+    BrokerCancelConfirmedWithFill { index: usize },
     BrokerReject { index: usize },
     BrokerCancelByFirm { index: usize },
     BrokerHold { index: usize },
@@ -185,7 +199,6 @@ pub enum Action {
 /// could disagree with it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SystemState {
-    pub next_valid_id: i32,
     pub orders: Vec<OrderSlot>,
     pub to_broker: Vec<Command>,
     pub to_client: Vec<Report>,
@@ -231,7 +244,6 @@ impl Model for Lifecycle {
 
     fn init_states(&self) -> Vec<Self::State> {
         vec![SystemState {
-            next_valid_id: i32::from(self.orders),
             orders: slots(usize::from(self.orders)),
             to_broker: Vec::new(),
             to_client: Vec::new(),
@@ -243,7 +255,7 @@ impl Model for Lifecycle {
         let report_room = state.to_client.len() < MAX_QUEUED_REPORTS;
 
         for id in self.ids() {
-            if command_room && id.get() < state.next_valid_id && order_of(state, id).is_none() {
+            if command_room && order_of(state, id).is_none() {
                 actions.push(Action::Place { id });
             }
         }
@@ -293,6 +305,9 @@ impl Model for Lifecycle {
             Action::BrokerCancelConfirmed { index } => {
                 Self::answer(state, index, Reply::CancelConfirmed)
             }
+            Action::BrokerCancelConfirmedWithFill { index } => {
+                Self::answer(state, index, Reply::CancelConfirmedWithFill)
+            }
             Action::BrokerReject { index } => Self::answer(state, index, Reply::Reject),
             Action::BrokerCancelByFirm { index } => Self::answer(state, index, Reply::CancelByFirm),
             Action::BrokerHold { index } => Self::answer(state, index, Reply::Hold),
@@ -334,6 +349,16 @@ impl Model for Lifecycle {
             Property::always("phase_never_regresses", phase_never_regresses),
         ]
     }
+
+    /// The queues are the only unbounded part of a state, so the boundary keeps
+    /// both inside their bounds.
+    ///
+    /// This is what makes every run terminate, including one whose `actions`
+    /// lets a reply past its bound by mistake. Without it such a run grows the
+    /// queue forever and the checker hangs instead of reporting.
+    fn within_boundary(&self, state: &Self::State) -> bool {
+        state.to_broker.len() <= MAX_QUEUED_COMMANDS && state.to_client.len() <= MAX_QUEUED_REPORTS
+    }
 }
 
 fn filled_within_total(_model: &Lifecycle, state: &SystemState) -> bool {
@@ -373,29 +398,25 @@ fn no_fill_after_done(_model: &Lifecycle, state: &SystemState) -> bool {
     })
 }
 
-/// An order closes at most once, and its history never re-opens it.
+/// An order closes at most once.
 ///
-/// Two facts, because the two ways to break "one outcome" look different. A
-/// second closing entry shows up in the count, and only the entries that state
-/// an ending count: a fill that reaches the order size is a consequence of the
-/// quantity, which [`filled_within_total`] and
-/// [`reported_filled_is_monotonic`] own. A revival shows up in the history, since
-/// a reducer that moves a finished order back to a live phase writes no second
-/// closing entry at all.
+/// Only the entries that state an ending count. A fill that reaches the order
+/// size is a consequence of the quantity, which [`filled_within_total`] and
+/// [`reported_filled_is_monotonic`] own, so counting it here would make one
+/// broken reducer fail three rules.
+///
+/// Reading the log alone is enough for the revival case too. Every reducer that
+/// can move a finished order back to a live phase also writes a live status
+/// entry that its log has to keep, so it shows up as a second closing entry no
+/// matter which arm of the reducer produced it.
 fn single_outcome(_model: &Lifecycle, state: &SystemState) -> bool {
     all_orders(state).all(|order| {
-        let closes = order
+        order
             .log()
             .iter()
             .filter(|entry| entry.broker_ended())
-            .count();
-        if closes > 1 {
-            return false;
-        }
-        order.history().windows(2).all(|pair| match pair {
-            [before, after] => !before.phase.is_done() || after.phase.is_done(),
-            _ => true,
-        })
+            .count()
+            <= 1
     })
 }
 

@@ -2,12 +2,13 @@
 // bans in library code.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::time::{Duration, Instant};
-
-use order_lifecycle::Strategy;
-use order_lifecycle::checker::{Lifecycle, MAX_QUEUED_COMMANDS, MAX_QUEUED_REPORTS, TOTAL};
-use order_lifecycle::tracker::MAX_LOG;
+use order_lifecycle::checker::{
+    Action, Command, Lifecycle, MAX_QUEUED_COMMANDS, MAX_QUEUED_REPORTS, SystemState, TOTAL,
+};
+use order_lifecycle::tracker::{MAX_LOG, OrderSlot};
+use order_lifecycle::{Order, OrderId, Report, Shares, Strategy};
 use stateright::{Checker, Model};
+use std::time::{Duration, Instant};
 
 /// One order id. Every rule relates an order to its own history, never to
 /// another order, so a second id explores the same rules against a larger
@@ -125,4 +126,198 @@ fn following_a_stale_phase_breaks_the_acceptance_order() {
     let run = explore(Strategy::FollowsStalePhase);
     assert_eq!(run.broken, vec!["phase_never_regresses"]);
     assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn relabelling_a_finished_order_breaks_the_single_outcome() {
+    // The closing entry stays in the log and a live phase is written after it,
+    // so the log says the order closed once while the history says it re-opened.
+    let run = explore(Strategy::RelabelsAfterDone);
+    assert_eq!(run.broken, vec!["single_outcome"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+/// The model's initial state, before any action.
+fn fresh(order_ids: u8) -> SystemState {
+    Lifecycle::new(Strategy::Correct, order_ids)
+        .init_states()
+        .pop()
+        .expect("the model has an initial state")
+}
+
+fn actions_of(state: &SystemState) -> Vec<Action> {
+    let mut actions = Vec::new();
+    Lifecycle::new(Strategy::Correct, ORDERS).actions(state, &mut actions);
+    actions
+}
+
+#[test]
+fn placing_needs_room_in_the_command_queue() {
+    // At the bound the client may not write another command, and the broker is
+    // still the one that answers what is already queued.
+    let mut state = fresh(ORDERS);
+    state.to_broker = vec![
+        Command::Place {
+            id: OrderId::new(0)
+        };
+        MAX_QUEUED_COMMANDS
+    ];
+
+    let actions = actions_of(&state);
+
+    assert!(!actions.iter().any(|a| matches!(a, Action::Place { .. })));
+    assert!(!actions.iter().any(|a| matches!(a, Action::Cancel { .. })));
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::BrokerAccept { .. }))
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::BrokerHold { .. }))
+    );
+}
+
+#[test]
+fn cancelling_needs_room_in_the_command_queue() {
+    // A placed order is cancellable only while the queue has room for the
+    // command, so a full queue must offer the cancel path nothing.
+    let mut state = fresh(ORDERS);
+    state.orders = vec![OrderSlot::Placed(Order::place(Shares::new(TOTAL)))];
+    state.to_broker = vec![
+        Command::Place {
+            id: OrderId::new(0)
+        };
+        MAX_QUEUED_COMMANDS
+    ];
+
+    assert!(
+        !actions_of(&state)
+            .iter()
+            .any(|a| matches!(a, Action::Cancel { .. }))
+    );
+}
+
+#[test]
+fn a_full_report_queue_offers_no_reply() {
+    // The room check is a sum, not a product. With the queue exactly full even a
+    // one-report reply has no room, and the two-report streams never do.
+    let mut state = fresh(ORDERS);
+    state.to_broker = vec![Command::Place {
+        id: OrderId::new(0),
+    }];
+    state.to_client = vec![
+        Report::Error {
+            order_id: None,
+            code: 0,
+            message: String::new(),
+        };
+        MAX_QUEUED_REPORTS
+    ];
+
+    assert!(
+        !actions_of(&state)
+            .iter()
+            .any(|a| matches!(a, Action::BrokerAccept { .. }))
+    );
+}
+
+#[test]
+fn the_boundary_admits_exactly_its_own_bounds() {
+    // This is the termination guarantee for every run, so both halves have to be
+    // enforced: a queue one past its bound stays outside the search.
+    let model = Lifecycle::new(Strategy::Correct, ORDERS);
+    let at = |commands: usize, reports: usize| {
+        let mut state = fresh(ORDERS);
+        state.to_broker = vec![
+            Command::Place {
+                id: OrderId::new(0)
+            };
+            commands
+        ];
+        state.to_client = vec![
+            Report::Error {
+                order_id: None,
+                code: 0,
+                message: String::new(),
+            };
+            reports
+        ];
+        state
+    };
+
+    assert!(model.within_boundary(&at(MAX_QUEUED_COMMANDS, MAX_QUEUED_REPORTS)));
+    assert!(!model.within_boundary(&at(MAX_QUEUED_COMMANDS + 1, MAX_QUEUED_REPORTS)));
+    assert!(!model.within_boundary(&at(MAX_QUEUED_COMMANDS, MAX_QUEUED_REPORTS + 1)));
+}
+
+#[test]
+fn a_reply_needs_room_for_its_whole_stream() {
+    // One reply appends every report it carries, so a partially fitting stream
+    // would overflow the queue. A reply of width one still fits when only one
+    // slot is left.
+    let mut state = fresh(ORDERS);
+    state.to_broker = vec![Command::Place {
+        id: OrderId::new(0),
+    }];
+    let room = MAX_QUEUED_REPORTS - 1;
+    state.to_client = vec![
+        Report::Error {
+            order_id: None,
+            code: 0,
+            message: String::new(),
+        };
+        room
+    ];
+
+    let actions = actions_of(&state);
+
+    // Every width-one reply fits; the two-snapshot acceptance and the two-report
+    // firm cancellation do not.
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, Action::BrokerAccept { .. }))
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::BrokerAcceptThenTransmit { .. }))
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::BrokerCancelByFirm { .. }))
+    );
+}
+
+#[test]
+fn reconnecting_needs_room_in_the_report_queue() {
+    let mut state = fresh(ORDERS);
+    let id = OrderId::new(0);
+    state.orders = vec![OrderSlot::Placed(order_lifecycle::Order::place(
+        Shares::new(TOTAL),
+    ))];
+
+    assert!(
+        actions_of(&state)
+            .iter()
+            .any(|a| matches!(a, Action::Reconnect { id: seen } if *seen == id))
+    );
+
+    state.to_client = vec![
+        Report::Error {
+            order_id: None,
+            code: 0,
+            message: String::new(),
+        };
+        MAX_QUEUED_REPORTS
+    ];
+
+    assert!(
+        !actions_of(&state)
+            .iter()
+            .any(|a| matches!(a, Action::Reconnect { .. }))
+    );
 }
