@@ -1,0 +1,13 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "order-lifecycle"
+publish = false
+version.workspace = true
+
+[dependencies]
+stateright.workspace = true
+tws-api = { path = "../tws-api" }
+
+[lints]
+workspace = true
