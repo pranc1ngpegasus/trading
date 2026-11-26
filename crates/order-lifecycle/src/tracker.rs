@@ -53,7 +53,8 @@ impl LivePhase {
     /// Position in the acceptance order, or `None` for [`Self::Inactive`],
     /// which sits outside it because an order leaves a hold into whichever
     /// phase it held before.
-    const fn rank(self) -> Option<u8> {
+    #[must_use]
+    pub const fn rank(self) -> Option<u8> {
         match self {
             Self::ApiPending => Some(0),
             Self::PreSubmitted => Some(1),
@@ -238,10 +239,10 @@ impl core::error::Error for ApplyError {}
 /// named for it catches it. Production callers only ever get
 /// [`Strategy::Correct`], the default.
 ///
-/// The last three variants are not in the spec's mutant table. They exist so
-/// that `duplicate_report_changes_nothing`, `cancel_after_done_is_refused` and
-/// `no_fill_after_done` each have a reducer that can fail them: an invariant no
-/// mutation can break proves nothing.
+/// The variants after the spec's mutant table are not in it. They exist so that
+/// `duplicate_report_changes_nothing`, `cancel_after_done_is_refused`,
+/// `no_fill_after_done` and `phase_never_regresses` each have a reducer that can
+/// fail them: an invariant no mutation can break proves nothing.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Strategy {
     #[default]
@@ -260,6 +261,8 @@ pub enum Strategy {
     CancelsAfterDone,
     /// Records a fill against an order that already finished.
     FillsAfterDone,
+    /// Follows a snapshot that names a phase the order already passed.
+    FollowsStalePhase,
 }
 
 impl Strategy {
@@ -296,6 +299,11 @@ impl Strategy {
     /// A fill after the outcome may still be recorded.
     const fn fills_after_done(self) -> bool {
         matches!(self, Self::FillsAfterDone)
+    }
+
+    /// A report naming a phase the order already passed may still move it.
+    const fn follows_stale(self) -> bool {
+        matches!(self, Self::FollowsStalePhase)
     }
 }
 
@@ -663,11 +671,20 @@ impl Order {
     /// A report naming the phase the order already holds is not a move, so it
     /// contributes no entry. Otherwise a repeated snapshot would log a phase
     /// change it did not make.
+    ///
+    /// A report naming a phase the order already passed is not a move either,
+    /// since [`LivePhase::advances_to`] refuses it. The reducer only reaches
+    /// that refusal because a reconnect replays snapshots whose order the client
+    /// cannot rely on, and following one would show a regression no broker
+    /// reported.
     fn advance_phase(&self, reported: Phase) -> Option<LivePhase> {
         let next = LivePhase::from_phase(reported)?;
         match self.phase {
             TrackedPhase::PendingSubmit => Some(next),
-            TrackedPhase::Live(current) if current != next && current.advances_to(next) => {
+            TrackedPhase::Live(current)
+                if current != next
+                    && (self.strategy.follows_stale() || current.advances_to(next)) =>
+            {
                 Some(next)
             }
             TrackedPhase::Live(_) | TrackedPhase::PendingCancel | TrackedPhase::Done(_) => None,

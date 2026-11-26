@@ -60,7 +60,8 @@ fn the_bounds_let_a_partial_fill_and_a_full_fill_both_happen() {
     // full one to take, and the log can hold a whole lifecycle.
     assert_eq!(TOTAL, 2);
     assert_eq!(MAX_QUEUED_COMMANDS, 2);
-    assert_eq!(MAX_QUEUED_REPORTS, 3);
+    // Two replies are 2 wide each, so both commands' answers fit at once.
+    assert_eq!(MAX_QUEUED_REPORTS, 4);
     const { assert!(MAX_LOG >= 5, "the log has to hold a full lifecycle run") };
 }
 
@@ -114,5 +115,15 @@ fn filling_a_finished_order_breaks_the_no_fill_rule() {
     // no mutation can break proves nothing.
     let run = explore(Strategy::FillsAfterDone);
     assert_eq!(run.broken, vec!["no_fill_after_done"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn following_a_stale_phase_breaks_the_acceptance_order() {
+    // Only an acceptance that arrives as a stream puts two live phases in the
+    // queue for one order, so without the two-snapshot reply this mutant has no
+    // stale snapshot to follow and the guard is untested.
+    let run = explore(Strategy::FollowsStalePhase);
+    assert_eq!(run.broken, vec!["phase_never_regresses"]);
     assert!(run.wall < BUDGET, "{:?}", run.wall);
 }

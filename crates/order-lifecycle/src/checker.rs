@@ -14,7 +14,7 @@
 //! Each rule is narrowed to the one fact it owns, so that a mutant fails the
 //! property named for it and not its neighbours. The fill rules own the
 //! quantity, `single_outcome` owns the closing entries and the phases after
-//! them, and the two history rules own one log position each. Widening any of
+//! them, and the history rules own one log position each. Widening any of
 //! them, for example by counting a fill that reaches the order size as a second
 //! closing entry, makes one mutant fail three rules and proves none of them.
 
@@ -22,7 +22,9 @@ use stateright::{Model, Property};
 
 use crate::id::OrderId;
 use crate::report::{Phase, Report, Shares};
-use crate::tracker::{Applied, OrderSlot, Strategy, deliver, place_order, request_cancel, slots};
+use crate::tracker::{
+    Applied, OrderSlot, Strategy, TrackedPhase, deliver, place_order, request_cancel, slots,
+};
 
 /// Every modelled order is this many shares, so one partial fill and one full
 /// fill are both reachable.
@@ -32,7 +34,12 @@ pub const TOTAL: u64 = 2;
 pub const MAX_QUEUED_COMMANDS: usize = 2;
 
 /// Reports the broker may have queued back to the client at once.
-pub const MAX_QUEUED_REPORTS: usize = 3;
+///
+/// The bound has to hold the widest answer to each command in flight, because
+/// the broker may answer both before the client reads either. An acceptance is
+/// two snapshots and a firm-side cancellation is an error plus a status, so two
+/// answers are four reports and a bound of three could never hold them together.
+pub const MAX_QUEUED_REPORTS: usize = 4;
 
 /// The client's outbound half of the connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -57,6 +64,14 @@ impl Command {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Reply {
     Accept,
+    /// The acceptance and the transmission as one answer.
+    ///
+    /// TWS answers a placement with a stream of snapshots, not one message, and
+    /// the stream reaches the client in whatever order the socket and the
+    /// reconnect replay produce. Returning both snapshots from one reply is what
+    /// puts `PreSubmitted` and `Submitted` in the queue for the same order, so
+    /// the guard that refuses a stale one has something to refuse.
+    AcceptThenTransmit,
     Transmit,
     PartFill,
     Fill,
@@ -67,8 +82,9 @@ enum Reply {
 }
 
 impl Reply {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Accept,
+        Self::AcceptThenTransmit,
         Self::Transmit,
         Self::PartFill,
         Self::Fill,
@@ -83,7 +99,7 @@ impl Reply {
     /// first because delivery order is free.
     const fn width(self) -> usize {
         match self {
-            Self::CancelByFirm => 2,
+            Self::AcceptThenTransmit | Self::CancelByFirm => 2,
             Self::Accept
             | Self::Transmit
             | Self::PartFill
@@ -97,6 +113,7 @@ impl Reply {
     const fn action(self, index: usize) -> Action {
         match self {
             Self::Accept => Action::BrokerAccept { index },
+            Self::AcceptThenTransmit => Action::BrokerAcceptThenTransmit { index },
             Self::Transmit => Action::BrokerTransmit { index },
             Self::PartFill => Action::BrokerPartFill { index },
             Self::Fill => Action::BrokerFill { index },
@@ -118,6 +135,10 @@ impl Reply {
         };
         match self {
             Self::Accept => vec![status(Phase::PreSubmitted, Shares::ZERO)],
+            Self::AcceptThenTransmit => vec![
+                status(Phase::PreSubmitted, Shares::ZERO),
+                status(Phase::Submitted, Shares::ZERO),
+            ],
             Self::Transmit => vec![status(Phase::Submitted, Shares::ZERO)],
             Self::PartFill => vec![status(Phase::Submitted, Shares::new(TOTAL - 1))],
             Self::Fill => vec![status(Phase::Filled, total)],
@@ -146,6 +167,7 @@ pub enum Action {
     Place { id: OrderId },
     Cancel { id: OrderId },
     BrokerAccept { index: usize },
+    BrokerAcceptThenTransmit { index: usize },
     BrokerTransmit { index: usize },
     BrokerPartFill { index: usize },
     BrokerFill { index: usize },
@@ -271,6 +293,9 @@ impl Model for Lifecycle {
                 Some(next)
             }
             Action::BrokerAccept { index } => Self::answer(state, index, Reply::Accept),
+            Action::BrokerAcceptThenTransmit { index } => {
+                Self::answer(state, index, Reply::AcceptThenTransmit)
+            }
             Action::BrokerTransmit { index } => Self::answer(state, index, Reply::Transmit),
             Action::BrokerPartFill { index } => Self::answer(state, index, Reply::PartFill),
             Action::BrokerFill { index } => Self::answer(state, index, Reply::Fill),
@@ -315,6 +340,7 @@ impl Model for Lifecycle {
                 duplicate_report_changes_nothing,
             ),
             Property::always("cancel_after_done_is_refused", cancel_after_done_is_refused),
+            Property::always("phase_never_regresses", phase_never_regresses),
         ]
     }
 }
@@ -414,6 +440,44 @@ fn cancel_after_done_is_refused(_model: &Lifecycle, state: &SystemState) -> bool
         order.history().iter().enumerate().all(|(index, before)| {
             !before.phase.is_done()
                 || !matches!(order.log().get(index + 1), Some(Applied::CancelRequested))
+        })
+    })
+}
+
+/// An order never goes back to a stage the broker already carried it past.
+///
+/// The broker answers with a stream of snapshots, and a reconnect replays them
+/// in an order the client cannot rely on. Following a `PreSubmitted` that lands
+/// after the `Submitted` it precedes would show the order rewinding, which is a
+/// regression the broker never reported. [`Strategy::FollowsStalePhase`] is the
+/// reducer that follows it.
+///
+/// [`crate::tracker::LivePhase::Inactive`] has no rank, because a hold and its
+/// release move in both directions by design. A pair with an unranked side is
+/// exempt.
+///
+/// The rule reads only the entries that record a phase move, because a reducer
+/// that rewinds on a report its own entry calls a duplicate contradicts that
+/// entry rather than the acceptance order, and [`duplicate_report_changes_nothing`]
+/// owns it.
+fn phase_never_regresses(_model: &Lifecycle, state: &SystemState) -> bool {
+    all_orders(state).all(|order| {
+        order.history().iter().enumerate().all(|(index, before)| {
+            let Some(after) = order.history().get(index + 1) else {
+                return true;
+            };
+            if !matches!(order.log().get(index + 1), Some(Applied::PhaseReport(_))) {
+                return true;
+            }
+            match (before.phase, after.phase) {
+                (TrackedPhase::Live(before), TrackedPhase::Live(after)) => {
+                    match (before.rank(), after.rank()) {
+                        (Some(before), Some(after)) => after >= before,
+                        _ => true,
+                    }
+                }
+                _ => true,
+            }
         })
     })
 }
