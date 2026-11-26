@@ -35,3 +35,12 @@ name = "trading"
 edition = "2024"
 license = "MIT"
 version = "2026.11.1"
+
+# Mutation runs rebuild and retest the tree once per mutant. Nothing reads the
+# debug info in those artifacts, and it costs `rustc` memory and time on every
+# rebuild. `crates/order-lifecycle` (224 mutants) peaked at 4.60 GB and 830-848 s
+# on this profile against 4.92 GB and 945 s on `test`. `.cargo/mutants.toml`
+# points cargo-mutants at this profile.
+[profile.mutants]
+debug = false
+inherits = "test"
