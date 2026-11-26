@@ -1,0 +1,4 @@
+# `profile.mutants` in the workspace manifest drops debug info. cargo-mutants
+# reads this file on every run, so `mutator`, `cargo mutants`, and the gates
+# that call them all build under it.
+profile = "mutants"
