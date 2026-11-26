@@ -57,6 +57,44 @@
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+          # `cargo-mutants` lets one compiler task run per CPU, so a mutant build
+          # spawns that many `rustc` processes and peak memory follows the core
+          # count. On this 32-core machine one `mutator --all` peaked at 485-500 MB
+          # uncapped against 407-438 MB at four tasks; four concurrent runs peaked
+          # at 1.87 GB against 1.61 GB. `tws-api` compiles 200 protos into one
+          # crate, so a single `rustc` on it costs about 430 MB. A run that passes
+          # its own jobserver flags keeps them, and `CARGO_MUTANTS_JOBSERVER_TASKS`
+          # overrides the cap.
+          cargoMutants = pkgs.writeShellScriptBin "cargo-mutants" ''
+            real=${pkgs.cargo-mutants}/bin/cargo-mutants
+            tasks=''${CARGO_MUTANTS_JOBSERVER_TASKS:-4}
+            # Never raise the limit on a machine with fewer cores than the cap.
+            cores=$(${pkgs.coreutils}/bin/nproc)
+            if [ "$cores" -lt "$tasks" ]; then
+              tasks=$cores
+            fi
+            for arg in "$@"; do
+              case "$arg" in
+                --jobserver | --jobserver=* | --jobserver-tasks | --jobserver-tasks=*)
+                  exec "$real" "$@"
+                  ;;
+              esac
+            done
+            # `--` opens cargo test's arguments, where a `cargo mutants` flag is
+            # a test argument instead.
+            args=()
+            inserted=""
+            for arg in "$@"; do
+              if [ "$arg" = "--" ] && [ -z "$inserted" ]; then
+                args+=(--jobserver-tasks "$tasks")
+                inserted=yes
+              fi
+              args+=("$arg")
+            done
+            [ -n "$inserted" ] || args+=(--jobserver-tasks "$tasks")
+            exec "$real" "''${args[@]}"
+          '';
+
           linkerPackages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux (
             with pkgs;
             [
@@ -118,7 +156,7 @@
               inputsFrom = [ config.pre-commit.devShell ];
 
               packages = with pkgs; [
-                cargo-mutants
+                cargoMutants
                 linkerPackages
                 mutator.packages.${system}.default
                 protobuf
