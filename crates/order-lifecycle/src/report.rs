@@ -21,7 +21,7 @@ pub enum Phase {
     PreSubmitted,
     Submitted,
     Cancelled,
-    /// The order's balance is cancelled, without a status the client asked for.
+    /// The client's cancel request landed before IB acknowledged the order.
     ApiCancelled,
     Filled,
     /// Accepted by IB but parked by a system or exchange condition.
@@ -78,7 +78,6 @@ impl Phase {
     }
 }
 
-/// A count of shares.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Shares(u64);
 
@@ -95,11 +94,6 @@ impl Shares {
         self.0
     }
 
-    /// Sums two counts, or `None` past `u64::MAX`.
-    ///
-    /// The tracker never adds fills, because the wire reports cumulative
-    /// totals. Callers that do aggregate fills get an explicit overflow
-    /// instead of a wrapped quantity.
     #[must_use]
     pub const fn checked_add(self, other: Self) -> Option<Self> {
         match self.0.checked_add(other.0) {
@@ -114,7 +108,6 @@ impl Shares {
     }
 }
 
-/// One inbound report, in the broker's vocabulary rather than the wire's.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Report {
     Status {
@@ -132,7 +125,6 @@ pub enum Report {
 }
 
 impl Report {
-    /// The order this report is about, when it names one.
     #[must_use]
     pub const fn order_id(&self) -> Option<OrderId> {
         match self {

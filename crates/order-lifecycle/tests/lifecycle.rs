@@ -77,7 +77,6 @@ fn a_cancel_that_a_fill_beats_says_the_order_filled() {
     apply(&mut order, &status(Phase::Submitted, 0));
     order.request_cancel().expect("cancel is legal while live");
 
-    // The fill lands first and completes the order.
     apply(&mut order, &status(Phase::Submitted, 10));
     assert_eq!(order.phase(), TrackedPhase::Done(Outcome::Filled));
     assert_eq!(order.filled(), TOTAL);
@@ -97,8 +96,6 @@ fn a_fill_that_a_cancel_beats_says_the_order_cancelled() {
 
 #[test]
 fn a_cancel_confirmed_with_the_whole_quantity_is_a_fill() {
-    // The phase label and the quantity disagree here. The quantity is what
-    // actually happened, so the order is filled rather than cancelled.
     let mut order = order();
     apply(&mut order, &status(Phase::Submitted, 0));
     order.request_cancel().expect("cancel is legal while live");
@@ -354,10 +351,7 @@ fn a_status_message_without_an_order_id_is_refused() {
 #[test]
 fn a_status_message_without_a_status_is_refused() {
     let message = proto::OrderStatus::default().with_order_id(7);
-    assert_eq!(
-        parse_status(&message),
-        Err(WireError::MissingStatus(String::new()))
-    );
+    assert_eq!(parse_status(&message), Err(WireError::MissingStatus));
 }
 
 #[test]
@@ -384,11 +378,11 @@ fn an_error_without_an_order_id_parses_without_naming_one() {
         .with_error_msg("connectivity lost");
     assert_eq!(
         parse_error(&message),
-        Ok(Report::Error {
+        Report::Error {
             order_id: None,
             code: 1100,
             message: "connectivity lost".into(),
-        })
+        }
     );
 }
 
@@ -400,19 +394,16 @@ fn an_error_carries_its_order_id_and_body() {
         .with_error_msg("order rejected");
     assert_eq!(
         parse_error(&message),
-        Ok(Report::Error {
+        Report::Error {
             order_id: Some(ID),
             code: 201,
             message: "order rejected".into(),
-        })
+        }
     );
 }
 
 #[test]
 fn a_status_survives_an_encode_and_decode() {
-    // The generated types are the only wiring this crate has to the wire, so the
-    // report a decoded message produces has to equal the report from the
-    // in-memory one.
     let message = proto::OrderStatus::default()
         .with_order_id(7)
         .with_status("Submitted")

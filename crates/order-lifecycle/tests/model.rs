@@ -60,7 +60,6 @@ fn the_bounds_let_a_partial_fill_and_a_full_fill_both_happen() {
     // full one to take, and the log can hold a whole lifecycle.
     assert_eq!(TOTAL, 2);
     assert_eq!(MAX_QUEUED_COMMANDS, 2);
-    // Two replies are 2 wide each, so both commands' answers fit at once.
     assert_eq!(MAX_QUEUED_REPORTS, 4);
     const { assert!(MAX_LOG >= 5, "the log has to hold a full lifecycle run") };
 }

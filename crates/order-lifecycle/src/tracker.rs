@@ -11,7 +11,6 @@ use crate::report::{Phase, Report, Shares};
 /// otherwise grows the log forever.
 pub const MAX_LOG: usize = 5;
 
-/// The phases an order can sit in while it still waits for the broker.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LivePhase {
     ApiPending,
@@ -22,8 +21,6 @@ pub enum LivePhase {
 }
 
 impl LivePhase {
-    /// The live phase a wire phase names, or `None` for a client-set, terminal
-    /// or unrecognised one.
     #[must_use]
     pub const fn from_phase(phase: Phase) -> Option<Self> {
         match phase {
@@ -79,7 +76,6 @@ impl LivePhase {
     }
 }
 
-/// How an order finished. Nothing later changes it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Outcome {
     Filled,
@@ -87,7 +83,6 @@ pub enum Outcome {
     Rejected,
 }
 
-/// What the client believes about one order's place in its lifecycle.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TrackedPhase {
     /// Written by the client and transmitted, not yet acknowledged by TWS.
@@ -122,7 +117,6 @@ impl TrackedPhase {
     }
 }
 
-/// The phase and cumulative fill an order held at one moment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Snapshot {
     pub phase: TrackedPhase,
@@ -135,22 +129,18 @@ impl Snapshot {
     }
 }
 
-/// A report the tracker refused to act on, and why.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum IgnoredReport {
-    /// The order already finished. No event revives an order.
     LateAfterDone,
     /// `PendingSubmit` or `PendingCancel`, which the client sets and TWS never
     /// sends.
     ClientSetPhase(Phase),
-    /// A status string that names no phase this client knows.
     UnknownPhase,
-    /// An error whose code carries no lifecycle rule for the order's phase.
-    UnhandledError { code: i32 },
+    UnhandledError {
+        code: i32,
+    },
 }
 
-/// One entry in an order's log: a report the tracker consumed, with what it
-/// did about it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Applied {
     Placed,
@@ -199,15 +189,10 @@ impl Applied {
 /// Every variant leaves the order exactly as it was.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplyError {
-    /// A report or a cancel that names no order this client placed.
     UnknownOrder(Option<OrderId>),
-    /// A cancel for an order that already finished.
     AlreadyDone,
-    /// A `Filled` report whose cumulative fill falls short of the order size.
     InconsistentFill { reported: Shares, total: Shares },
-    /// The order's log is at [`MAX_LOG`], so the report cannot be recorded.
     LogFull,
-    /// A place for an id that already holds an order.
     DuplicateOrder(OrderId),
 }
 
@@ -253,67 +238,55 @@ pub enum Strategy {
     RevivesAfterDone,
     /// Lets a later cancellation replace the recorded outcome.
     AcceptsSecondOutcome,
-    /// Adds the report's quantity to a report that should have added nothing.
+    /// Adds one share to a report that should have added nothing.
     OverfillsOnDuplicate,
     /// Rolls the phase back on a report whose entry says nothing changed.
     RephasesOnDuplicate,
-    /// Records a cancel for an order that already finished.
     CancelsAfterDone,
-    /// Records a fill against an order that already finished.
     FillsAfterDone,
     /// Follows a snapshot that names a phase the order already passed.
     FollowsStalePhase,
 }
 
 impl Strategy {
-    /// The reported value is added to the tracker's fill, not compared with it.
     const fn counts_deltas(self) -> bool {
         matches!(self, Self::DoubleCountsRedeliveredFill)
     }
 
-    /// A finished order may be moved back to a live phase.
     const fn revives(self) -> bool {
         matches!(self, Self::RevivesAfterDone)
     }
 
-    /// A cancellation may replace the outcome an order already reached.
     const fn overwrites_outcome(self) -> bool {
         matches!(self, Self::AcceptsSecondOutcome)
     }
 
-    /// A report that should add nothing may still add its quantity.
     const fn overfills(self) -> bool {
         matches!(self, Self::OverfillsOnDuplicate)
     }
 
-    /// A report that should add nothing may still roll the phase back.
     const fn rephases(self) -> bool {
         matches!(self, Self::RephasesOnDuplicate)
     }
 
-    /// A cancel after the outcome may still be recorded.
     const fn cancels_after_done(self) -> bool {
         matches!(self, Self::CancelsAfterDone)
     }
 
-    /// A fill after the outcome may still be recorded.
     const fn fills_after_done(self) -> bool {
         matches!(self, Self::FillsAfterDone)
     }
 
-    /// A report naming a phase the order already passed may still move it.
     const fn follows_stale(self) -> bool {
         matches!(self, Self::FollowsStalePhase)
     }
 }
 
-/// One entry and the state the order held just after it.
 struct Step {
     applied: Applied,
     at: Snapshot,
 }
 
-/// The states a report produces, before the tracker commits them.
 struct Transition {
     steps: Vec<Step>,
     phase: TrackedPhase,
@@ -352,7 +325,6 @@ pub struct Order {
 }
 
 impl Order {
-    /// An order the client just wrote, before any broker report.
     #[must_use]
     pub fn place(total: Shares) -> Self {
         let at = Snapshot::new(TrackedPhase::PendingSubmit, Shares::ZERO);
@@ -421,12 +393,6 @@ impl Order {
         Some((phase, self.filled, self.total.saturating_sub(self.filled)))
     }
 
-    /// Records that the client asked to cancel.
-    ///
-    /// # Errors
-    ///
-    /// [`ApplyError::AlreadyDone`] once the order finished, and
-    /// [`ApplyError::LogFull`] when the log is full. Both leave it untouched.
     pub fn request_cancel(&mut self) -> Result<&Applied, ApplyError> {
         if self.phase == TrackedPhase::PendingCancel {
             return self.commit(Transition::one(
@@ -455,13 +421,6 @@ impl Order {
         ))
     }
 
-    /// Consumes one broker report and returns the entry that states what it did.
-    ///
-    /// # Errors
-    ///
-    /// [`ApplyError::InconsistentFill`] for a `Filled` report that does not
-    /// carry the whole quantity, and [`ApplyError::LogFull`] when the log is
-    /// full. Both leave the order untouched.
     pub fn apply(&mut self, report: &Report) -> Result<&Applied, ApplyError> {
         let transition = self.plan(report)?;
         self.commit(transition)
@@ -470,9 +429,9 @@ impl Order {
     fn plan(&self, report: &Report) -> Result<Transition, ApplyError> {
         match report {
             Report::Status { phase, filled, .. } => self.plan_status(*phase, *filled),
-            // Rule 9 covers errors too. A 202 that arrives behind the fill it
-            // cancelled describes an order that already closed, and recording it
-            // would hand the order a second outcome.
+            // The single-outcome rule covers errors too. A 202 that arrives behind
+            // the fill it cancelled describes an order that already closed, and
+            // recording it would hand the order a second outcome.
             Report::Error { .. } if self.phase.is_done() => {
                 Ok(self.ignored(IgnoredReport::LateAfterDone))
             }
@@ -761,12 +720,6 @@ pub fn slots(capacity: usize) -> Vec<OrderSlot> {
     vec![OrderSlot::Free; capacity]
 }
 
-/// Places an order in the slot its id names.
-///
-/// # Errors
-///
-/// [`ApplyError::UnknownOrder`] for an id this client was never given, and
-/// [`ApplyError::DuplicateOrder`] for an id already in use.
 pub fn place_order(
     orders: &mut [OrderSlot],
     id: OrderId,
@@ -786,10 +739,6 @@ pub fn place_order(
     }
 }
 
-/// # Errors
-///
-/// [`ApplyError::UnknownOrder`] for an id with no order, plus what
-/// [`Order::request_cancel`] returns.
 pub fn request_cancel(orders: &mut [OrderSlot], id: OrderId) -> Result<&Applied, ApplyError> {
     let slot = slot_mut(orders, id).ok_or(ApplyError::UnknownOrder(Some(id)))?;
     slot.order_mut()
@@ -797,12 +746,6 @@ pub fn request_cancel(orders: &mut [OrderSlot], id: OrderId) -> Result<&Applied,
         .request_cancel()
 }
 
-/// Routes one report to the order it names.
-///
-/// # Errors
-///
-/// [`ApplyError::UnknownOrder`] when the report names no order, plus what
-/// [`Order::apply`] returns.
 pub fn deliver<'a>(
     orders: &'a mut [OrderSlot],
     report: &Report,

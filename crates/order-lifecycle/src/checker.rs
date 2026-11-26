@@ -30,7 +30,6 @@ use crate::tracker::{
 /// fill are both reachable.
 pub const TOTAL: u64 = 2;
 
-/// Commands the client may have in flight to the broker at once.
 pub const MAX_QUEUED_COMMANDS: usize = 2;
 
 /// Reports the broker may have queued back to the client at once.
@@ -41,7 +40,6 @@ pub const MAX_QUEUED_COMMANDS: usize = 2;
 /// answers are four reports and a bound of three could never hold them together.
 pub const MAX_QUEUED_REPORTS: usize = 4;
 
-/// The client's outbound half of the connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Command {
     Place { id: OrderId },
@@ -161,7 +159,6 @@ impl Reply {
     }
 }
 
-/// One step the model may take.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Action {
     Place { id: OrderId },
@@ -188,18 +185,12 @@ pub enum Action {
 /// could disagree with it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SystemState {
-    /// The id TWS said to use next. The client may only place below it.
     pub next_valid_id: i32,
-    /// One slot per id the model allows.
     pub orders: Vec<OrderSlot>,
-    /// Commands written to the socket and not yet answered.
     pub to_broker: Vec<Command>,
-    /// Reports read from the socket and not yet handed to the tracker.
     pub to_client: Vec<Report>,
 }
 
-/// The lifecycle model, parameterised by which reducer to run and how many
-/// order ids the client may use.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Lifecycle {
     pub strategy: Strategy,
@@ -345,7 +336,6 @@ impl Model for Lifecycle {
     }
 }
 
-/// No order records more shares filled than it was for.
 fn filled_within_total(_model: &Lifecycle, state: &SystemState) -> bool {
     all_orders(state).all(|order| order.filled() <= order.total())
 }
@@ -434,7 +424,6 @@ fn duplicate_report_changes_nothing(_model: &Lifecycle, state: &SystemState) -> 
     })
 }
 
-/// No order records a cancel request once its own history has closed it.
 fn cancel_after_done_is_refused(_model: &Lifecycle, state: &SystemState) -> bool {
     all_orders(state).all(|order| {
         order.history().iter().enumerate().all(|(index, before)| {

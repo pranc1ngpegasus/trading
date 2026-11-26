@@ -9,6 +9,11 @@
 //! Out of scope: bracket and OCA orders, `parent_id` linkage, and any socket or
 //! async client. Nothing here opens a connection.
 
+// Every fallible function here returns this crate's own error type, whose
+// variants the signature already names, so an `# Errors` section would only
+// restate them.
+#![allow(clippy::missing_errors_doc)]
+
 pub mod boundary;
 pub mod checker;
 pub mod id;
