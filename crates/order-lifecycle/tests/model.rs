@@ -77,3 +77,42 @@ fn reviving_a_finished_order_breaks_the_single_outcome() {
     assert_eq!(run.broken, vec!["single_outcome"]);
     assert!(run.wall < BUDGET, "{:?}", run.wall);
 }
+
+#[test]
+fn accepting_a_second_outcome_breaks_the_single_outcome() {
+    let run = explore(Strategy::AcceptsSecondOutcome);
+    assert_eq!(run.broken, vec!["single_outcome"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn overfilling_on_a_duplicate_breaks_the_total() {
+    let run = explore(Strategy::OverfillsOnDuplicate);
+    assert_eq!(run.broken, vec!["filled_within_total"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn rephasing_on_a_duplicate_breaks_the_duplicate_rule() {
+    let run = explore(Strategy::RephasesOnDuplicate);
+    assert_eq!(run.broken, vec!["duplicate_report_changes_nothing"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn cancelling_a_finished_order_breaks_the_cancel_rule() {
+    let run = explore(Strategy::CancelsAfterDone);
+    assert_eq!(run.broken, vec!["cancel_after_done_is_refused"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
+
+#[test]
+fn filling_a_finished_order_breaks_the_no_fill_rule() {
+    // The spec lists `no_fill_after_done` as the rule `RevivesAfterDone` may
+    // break, and that mutant does break `single_outcome`. This variant exists so
+    // the no-fill rule has a reducer that can fail it on its own: an invariant
+    // no mutation can break proves nothing.
+    let run = explore(Strategy::FillsAfterDone);
+    assert_eq!(run.broken, vec!["no_fill_after_done"]);
+    assert!(run.wall < BUDGET, "{:?}", run.wall);
+}
