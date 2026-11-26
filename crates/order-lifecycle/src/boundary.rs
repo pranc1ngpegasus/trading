@@ -25,6 +25,10 @@ impl fmt::Display for WireError {
 
 impl core::error::Error for WireError {}
 
+/// # Errors
+///
+/// A [`WireError`] when the message omits the order id or the status string,
+/// or carries a quantity that is not an unsigned integer.
 pub fn parse_status(msg: &proto::OrderStatus) -> Result<Report, WireError> {
     let order_id = msg
         .order_id

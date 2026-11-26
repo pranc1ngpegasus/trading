@@ -393,6 +393,10 @@ impl Order {
         Some((phase, self.filled, self.total.saturating_sub(self.filled)))
     }
 
+    /// # Errors
+    ///
+    /// [`ApplyError::AlreadyDone`] once the order finished, and
+    /// [`ApplyError::LogFull`] when the log is full. Both leave it untouched.
     pub fn request_cancel(&mut self) -> Result<&Applied, ApplyError> {
         if self.phase == TrackedPhase::PendingCancel {
             return self.commit(Transition::one(
@@ -421,6 +425,11 @@ impl Order {
         ))
     }
 
+    /// # Errors
+    ///
+    /// [`ApplyError::InconsistentFill`] for a `Filled` report whose quantity
+    /// falls short of the order size, and [`ApplyError::LogFull`] when the log
+    /// is full. Both leave the order untouched.
     pub fn apply(&mut self, report: &Report) -> Result<&Applied, ApplyError> {
         let transition = self.plan(report)?;
         self.commit(transition)
@@ -720,6 +729,11 @@ pub fn slots(capacity: usize) -> Vec<OrderSlot> {
     vec![OrderSlot::Free; capacity]
 }
 
+/// # Errors
+///
+/// [`ApplyError::UnknownOrder`] when the id names no slot this client was
+/// given, and [`ApplyError::DuplicateOrder`] when the slot already holds an
+/// order.
 pub fn place_order(
     orders: &mut [OrderSlot],
     id: OrderId,
@@ -739,6 +753,10 @@ pub fn place_order(
     }
 }
 
+/// # Errors
+///
+/// [`ApplyError::UnknownOrder`] when the id names no placed order, plus what
+/// [`Order::request_cancel`] returns.
 pub fn request_cancel(orders: &mut [OrderSlot], id: OrderId) -> Result<&Applied, ApplyError> {
     let slot = slot_mut(orders, id).ok_or(ApplyError::UnknownOrder(Some(id)))?;
     slot.order_mut()
@@ -746,6 +764,10 @@ pub fn request_cancel(orders: &mut [OrderSlot], id: OrderId) -> Result<&Applied,
         .request_cancel()
 }
 
+/// # Errors
+///
+/// [`ApplyError::UnknownOrder`] when the report names no placed order, plus what
+/// [`Order::apply`] returns.
 pub fn deliver<'a>(
     orders: &'a mut [OrderSlot],
     report: &Report,
